@@ -937,8 +937,14 @@ msgstr "小时"
 msgid "Hour"
 msgstr "小时"
 
-msgid "Location of V2ray/Xray asset"
-msgstr "V2ray/Xray 资源文件目录"
+msgid "GeoIP Update URL"
+msgstr "GeoIP 更新URL"
+
+msgid "Geosite Update URL"
+msgstr "Geosite 更新URL"
+
+msgid "Location of Geo rule files"
+msgstr "Geo 规则文件目录"
 
 msgid "This variable specifies a directory where geoip.dat and geosite.dat files are."
 msgstr "此变量指定 geoip.dat 和 geosite.dat 文件所在的目录。"
@@ -1815,3 +1821,9 @@ msgstr "中断现有连接"
 
 msgid "Interrupt existing connections when the selected outbound has changed."
 msgstr "当选择的出站发生变化时中断现有连接。"
+
+msgid "Port hopping range"
+msgstr "端口跳跃范围"
+
+msgid "Format as 1000:2000 Multiple groups are separated by commas (,)."
+msgstr "格式为：1000:2000 多组时用逗号(,)隔开。"
