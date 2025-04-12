@@ -7,7 +7,7 @@ local appname = "passwall"
 local fs = api.fs
 local split = api.split
 
-local local_version = api.get_app_version("singbox")
+local local_version = api.get_app_version("sing-box")
 local version_ge_1_11_0 = api.compare_versions(local_version:match("[^v]+"), ">=", "1.11.0")
 
 local geosite_all_tag = {}
@@ -390,8 +390,9 @@ function gen_outbound(flag, node, tag, proxy_table)
 
 		if node.protocol == "hysteria2" then
 			local server_ports = {}
-			if node.hysteria2_ports then
-				for range in node.hysteria2_ports:gmatch("([^,]+)") do
+			if node.hysteria2_hop then
+				node.hysteria2_hop = string.gsub(node.hysteria2_hop, "-", ":")
+				for range in node.hysteria2_hop:gmatch("([^,]+)") do
 					if range:match("^%d+:%d+$") then
 						table.insert(server_ports, range)
 					end
