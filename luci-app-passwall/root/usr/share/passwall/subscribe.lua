@@ -29,11 +29,22 @@ local has_singbox = api.finded_com("sing-box")
 local has_xray = api.finded_com("xray")
 local has_hysteria2 = api.finded_com("hysteria")
 local allowInsecure_default = nil
-local ss_type_default = uci:get(appname, "@global_subscribe[0]", "ss_type") or "shadowsocks-libev"
-local trojan_type_default = uci:get(appname, "@global_subscribe[0]", "trojan_type") or "trojan-plus"
-local vmess_type_default = uci:get(appname, "@global_subscribe[0]", "vmess_type") or "xray"
-local vless_type_default = uci:get(appname, "@global_subscribe[0]", "vless_type") or "xray"
-local hysteria2_type_default = uci:get(appname, "@global_subscribe[0]", "hysteria2_type") or "hysteria2"
+-- 取节点使用core类型（节点订阅页面未设置时，自动取默认）
+local function get_core(field, candidates)
+	local v = uci:get(appname, "@global_subscribe[0]", field)
+	if not v or v == "" then
+		for _, c in ipairs(candidates) do
+			if c[1] then return c[2] end
+		end
+	end
+	return v
+end
+local ss_type_default = get_core("ss_type", {{has_ss,"shadowsocks-libev"},{has_ss_rust,"shadowsocks-rust"},{has_singbox,"sing-box"},{has_xray,"xray"}})
+local trojan_type_default = get_core("trojan_type", {{has_trojan_plus,"trojan-plus"},{has_singbox,"sing-box"},{has_xray,"xray"}})
+local vmess_type_default = get_core("vmess_type", {{has_xray,"xray"},{has_singbox,"sing-box"}})
+local vless_type_default = get_core("vless_type", {{has_xray,"xray"},{has_singbox,"sing-box"}})
+local hysteria2_type_default = get_core("hysteria2_type", {{has_hysteria2,"hysteria2"},{has_singbox,"sing-box"},{has_xray,"xray"}})
+----
 local domain_strategy_default = uci:get(appname, "@global_subscribe[0]", "domain_strategy") or ""
 local domain_strategy_node = ""
 local preproxy_node_group, to_node_group, chain_node_type = "", "", ""
@@ -427,8 +438,12 @@ local function get_subscribe_info(cfgid, value)
 		return
 	end
 	value = value:gsub("%s+", "")
-	local expired_date = value:match("套餐到期：(.+)")
-	local rem_traffic = value:match("剩余流量：(.+)")
+	local date_patterns = {"套餐到期：(.+)", "过期时间：(.+)", "有效期至：(.+)", "到期时间：(.+)", "截止日期：(.+)"}
+	local expired_date
+	for _, p in ipairs(date_patterns) do expired_date = value:match(p) or expired_date end
+	local rem_patterns = {"剩余流量：(.+)", "流量剩余：(.+)", "可用流量：(.+)", "套餐剩余：(.+)"}
+	local rem_traffic
+	for _, p in ipairs(rem_patterns) do rem_traffic = value:match(p) or rem_traffic end
 	subscribe_info[cfgid] = subscribe_info[cfgid] or {expired_date = "", rem_traffic = ""}
 	if expired_date then
 		subscribe_info[cfgid]["expired_date"] = expired_date
@@ -438,13 +453,33 @@ local function get_subscribe_info(cfgid, value)
 	end
 end
 
+-- 设置 ss 协议实现类型
+local function set_ss_implementation(result)
+	if ss_type_default == "shadowsocks-libev" and has_ss then
+		result.type = "SS"
+	elseif ss_type_default == "shadowsocks-rust" and has_ss_rust then
+		result.type = 'SS-Rust'
+	elseif ss_type_default == "xray" and has_xray then
+		result.type = 'Xray'
+		result.protocol = 'shadowsocks'
+		result.transport = 'raw'
+	elseif ss_type_default == "sing-box" and has_singbox then
+		result.type = 'sing-box'
+		result.protocol = 'shadowsocks'
+	else
+		log("跳过 SS 节点，因未适配到 SS 核心程序，或未正确设置节点使用类型。")
+		return nil
+	end
+	return result
+end
+
 -- 处理数据
-local function processData(szType, content, add_mode, add_from)
-	--log(content, add_mode, add_from)
+local function processData(szType, content, add_mode, group)
+	--log(content, add_mode, group)
 	local result = {
 		timeout = 60,
 		add_mode = add_mode, --0为手动配置,1为导入,2为订阅
-		add_from = add_from
+		group = group
 	}
 	--ssr://base64(host:port:protocol:method:obfs:base64pass/?obfsparam=base64param&protoparam=base64param&remarks=base64remarks&group=base64group&udpport=0&uot=0)
 	if szType == 'ssr' then
@@ -473,8 +508,8 @@ local function processData(szType, content, add_mode, add_from)
 		end
 		result.obfs_param = base64Decode(params.obfsparam)
 		result.protocol_param = base64Decode(params.protoparam)
-		local group = base64Decode(params.group)
-		if group then result.group = group end
+		-- local ssr_group = base64Decode(params.group)
+		-- if ssr_group then result.ssr_group = ssr_group end
 		result.remarks = base64Decode(params.remarks)
 	elseif szType == 'vmess' then
 		local info = jsonParse(content)
@@ -502,7 +537,6 @@ local function processData(szType, content, add_mode, add_from)
 		elseif result.type == "Xray" and info.net == "tcp" then
 			info.net = "raw"
 		end
-		if info.net == "splithttp" then info.net = "xhttp" end
 		if info.net == 'h2' or info.net == 'http' then
 			info.net = "http"
 			result.transport = (result.type == "Xray") and "xhttp" or "http"
@@ -587,26 +621,13 @@ local function processData(szType, content, add_mode, add_from)
 			result.tls = "0"
 		end
 
-		if result.type == "sing-box" and (result.transport == "mkcp" or result.transport == "xhttp" or result.transport == "splithttp") then
+		if result.type == "sing-box" and (result.transport == "mkcp" or result.transport == "xhttp") then
 			log("跳过节点:" .. result.remarks .."，因Sing-Box不支持" .. szType .. "协议的" .. result.transport .. "传输方式，需更换Xray。")
 			return nil
 		end
 	elseif szType == "ss" then
-		if ss_type_default == "shadowsocks-libev" and has_ss then
-			result.type = "SS"
-		elseif ss_type_default == "shadowsocks-rust" and has_ss_rust then
-			result.type = 'SS-Rust'
-		elseif ss_type_default == "xray" and has_xray then
-			result.type = 'Xray'
-			result.protocol = 'shadowsocks'
-			result.transport = 'raw'
-		elseif ss_type_default == "sing-box" and has_singbox then
-			result.type = 'sing-box'
-			result.protocol = 'shadowsocks'
-		else
-			log("跳过 SS 节点，因未适配到 SS 核心程序，或未正确设置节点使用类型。")
-			return nil
-		end
+		result = set_ss_implementation(result)
+		if not result then return nil end
 
 		--SS-URI = "ss://" userinfo "@" hostname ":" port [ "/" ] [ "?" plugin ] [ "#" tag ]
 		--userinfo = websafe-base64-encode-utf8(method  ":" password)
@@ -675,8 +696,13 @@ local function processData(szType, content, add_mode, add_from)
 			else
 				userinfo = base64Decode(hostInfo[1])
 			end
-			local method = userinfo:sub(1, userinfo:find(":") - 1)
-			local password = userinfo:sub(userinfo:find(":") + 1, #userinfo)
+			local method, password
+			if userinfo:find(":") then
+				method = userinfo:sub(1, userinfo:find(":") - 1)
+				password = userinfo:sub(userinfo:find(":") + 1, #userinfo)
+			else
+				password = hostInfo[1]  --一些链接用明文uuid做密码
+			end
 
 			-- 判断密码是否经过url编码
 			local function isURLEncodedPassword(pwd)
@@ -691,12 +717,20 @@ local function processData(szType, content, add_mode, add_from)
 			if isURLEncodedPassword(password) and decoded then
 				password = decoded
 			end
+
+			local _method = (method or "none"):lower()
+			method = (_method == "chacha20-poly1305" and "chacha20-ietf-poly1305") or
+				(_method == "xchacha20-poly1305" and "xchacha20-ietf-poly1305") or _method
+
 			result.method = method
 			result.password = password
 
-			if result.type ~= "Xray" then
-				result.method = (method:lower() == "chacha20-poly1305" and "chacha20-ietf-poly1305") or
-						(method:lower() == "xchacha20-poly1305" and "xchacha20-ietf-poly1305") or method
+			if has_xray and (result.type ~= 'Xray' and  result.type ~= 'sing-box' and params.type) then
+				result.type = 'Xray'
+				result.protocol = 'shadowsocks'
+			elseif has_singbox and (result.type ~= 'Xray' and  result.type ~= 'sing-box' and params.type) then
+				result.type = 'sing-box'
+				result.protocol = 'shadowsocks'
 			end
 
 			if result.plugin then
@@ -714,6 +748,7 @@ local function processData(szType, content, add_mode, add_from)
 							result.transport = "raw"
 							result.tcp_guise = "http"
 							result.tcp_guise_http_host = (obfs_host and obfs_host ~= "") and { obfs_host } or nil
+							result.tcp_guise_http_path = { "/" }
 						elseif obfs == "tls" then
 							result.tls = "1"
 							result.tls_serverName = obfs_host
@@ -811,6 +846,22 @@ local function processData(szType, content, add_mode, add_from)
 						if params.path then result.grpc_serviceName = params.path end
 						if params.serviceName then result.grpc_serviceName = params.serviceName end
 						result.grpc_mode = params.mode or "gun"
+					end
+					if params.type == 'xhttp' then
+						if result.type ~= "Xray" then
+							result.error_msg = "请更换 Xray 以支持 xhttp 传输方式."
+						end
+						result.xhttp_host = params.host
+						result.xhttp_path = params.path
+						result.xhttp_mode = params.mode or "auto"
+						result.use_xhttp_extra = (params.extra and params.extra ~= "") and "1" or nil
+						result.xhttp_extra = (params.extra and params.extra ~= "") and api.base64Encode(params.extra) or nil
+						local success, Data = pcall(jsonParse, params.extra)
+						if success and Data then
+							local address = (Data.extra and Data.extra.downloadSettings and Data.extra.downloadSettings.address)
+									or (Data.downloadSettings and Data.downloadSettings.address)
+							result.download_address = (address and address ~= "") and address:gsub("^%[", ""):gsub("%]$", "") or nil
+						end
 					end
 					result.tls = "0"
 					if params.security == "tls" or params.security == "reality" then
@@ -1027,7 +1078,7 @@ local function processData(szType, content, add_mode, add_from)
 				if params.serviceName then result.grpc_serviceName = params.serviceName end
 				result.grpc_mode = params.mode or "gun"
 			end
-			if params.type == 'xhttp' or params.type == 'splithttp' then
+			if params.type == 'xhttp' then
 				result.xhttp_host = params.host
 				result.xhttp_path = params.path
 			end
@@ -1036,18 +1087,17 @@ local function processData(szType, content, add_mode, add_from)
 				result.httpupgrade_path = params.path
 			end
 
-			result.encryption = params.encryption or "none"
-			result.flow = params.flow and params.flow:gsub("-udp443", "") or nil
 			result.alpn = params.alpn
 
-			if result.type == "sing-box" and (result.transport == "mkcp" or result.transport == "xhttp" or result.transport == "splithttp") then
+			if result.type == "sing-box" and (result.transport == "mkcp" or result.transport == "xhttp") then
 				log("跳过节点:" .. result.remarks .."，因Sing-Box不支持" .. szType .. "协议的" .. result.transport .. "传输方式，需更换Xray。")
 				return nil
 			end
 		end
 
 	elseif szType == "ssd" then
-		result.type = "SS"
+		result = set_ss_implementation(result)
+		if not result then return nil end
 		result.address = content.server
 		result.port = content.port
 		result.password = content.password
@@ -1101,12 +1151,14 @@ local function processData(szType, content, add_mode, add_from)
 
 			if not params.type then params.type = "tcp" end
 			params.type = string.lower(params.type)
+			if ({ xhttp=true, kcp=true, mkcp=true })[params.type] and result.type ~= "Xray" and has_xray then
+				result.type = "Xray"
+			end
 			if result.type == "sing-box" and params.type == "raw" then 
 				params.type = "tcp"
 			elseif result.type == "Xray" and params.type == "tcp" then
 				params.type = "raw"
 			end
-			if params.type == "splithttp" then params.type = "xhttp" end
 			if params.type == "h2" or params.type == "http" then
 				params.type = "http"
 				result.transport = (result.type == "Xray") and "xhttp" or "http"
@@ -1175,14 +1227,12 @@ local function processData(szType, content, add_mode, add_from)
 				result.xhttp_path = params.path
 				result.xhttp_mode = params.mode or "auto"
 				result.use_xhttp_extra = (params.extra and params.extra ~= "") and "1" or nil
-				result.xhttp_extra = (params.extra and params.extra ~= "") and params.extra or nil
+				result.xhttp_extra = (params.extra and params.extra ~= "") and api.base64Encode(params.extra) or nil
 				local success, Data = pcall(jsonParse, params.extra)
 				if success and Data then
 					local address = (Data.extra and Data.extra.downloadSettings and Data.extra.downloadSettings.address)
 							or (Data.downloadSettings and Data.downloadSettings.address)
-					result.download_address = address and address ~= "" and address or nil
-				else
-					result.download_address = nil
+					result.download_address = (address and address ~= "") and address:gsub("^%[", ""):gsub("%]$", "") or nil
 				end
 			end
 			if params.type == 'httpupgrade' then
@@ -1226,7 +1276,7 @@ local function processData(szType, content, add_mode, add_from)
 				result.tls_allowInsecure = allowInsecure_default and "1" or "0"
 			end
 
-			if result.type == "sing-box" and (result.transport == "mkcp" or result.transport == "xhttp" or result.transport == "splithttp") then
+			if result.type == "sing-box" and (result.transport == "mkcp" or result.transport == "xhttp") then
 				log("跳过节点:" .. result.remarks .."，因Sing-Box不支持" .. szType .. "协议的" .. result.transport .. "传输方式，需更换Xray。")
 				return nil
 			end
@@ -1333,8 +1383,9 @@ local function processData(szType, content, add_mode, add_from)
 		result.hysteria2_tls_pinSHA256 = params.pinSHA256
 		result.hysteria2_hop = params.mport
 
-		if hysteria2_type_default == "sing-box" and has_singbox then
-			result.type = 'sing-box'
+		if (hysteria2_type_default == "sing-box" and has_singbox) or (hysteria2_type_default == "xray" and has_xray) then
+			local is_singbox = hysteria2_type_default == "sing-box" and has_singbox
+			result.type = is_singbox and 'sing-box' or 'Xray'
 			result.protocol = "hysteria2"
 			if params["obfs-password"] or params["obfs_password"] then
 				result.hysteria2_obfs_type = "salamander"
@@ -1498,12 +1549,15 @@ local function processData(szType, content, add_mode, add_from)
 end
 
 local function curl(url, file, ua, mode)
+	if not url or url == "" then return 404 end
 	local curl_args = {
 		"-skL", "-w %{http_code}", "--retry 3", "--connect-timeout 3"
 	}
 	if ua and ua ~= "" and ua ~= "curl" then
+		ua = (ua == "passwall") and ("passwall/" .. api.get_version()) or ua
 		curl_args[#curl_args + 1] = '--user-agent "' .. ua .. '"'
 	end
+	curl_args[#curl_args + 1] = get_headers()
 	local return_code, result
 	if mode == "direct" then
 		return_code, result = api.curl_direct(url, file, curl_args)
@@ -1515,14 +1569,65 @@ local function curl(url, file, ua, mode)
 	return tonumber(result)
 end
 
-local function truncate_nodes(add_from)
+function get_headers()
+	local cache_file = "/tmp/etc/" .. appname .. "_tmp/sub_curl_headers"
+	if fs.access(cache_file) then
+		return luci.sys.exec("cat " .. cache_file)
+	end
+	local headers = {}
+
+	local function readfile(path)
+		local f = io.open(path, "r")
+		if not f then return nil end
+		local c = f:read("*a")
+		f:close()
+		return api.trim(c)
+	end
+
+	headers[#headers + 1] = "x-device-os: OpenWrt"
+
+	local rel = readfile("/etc/openwrt_release")
+	local os_ver = rel and rel:match("DISTRIB_RELEASE='([^']+)'")
+	if os_ver then
+		headers[#headers + 1] = "x-ver-os: " .. os_ver
+	end
+
+	local model = readfile("/tmp/sysinfo/model")
+	if model then
+		headers[#headers + 1] = "x-device-model: " .. model
+	end
+
+	local mac = readfile("/sys/class/net/eth0/address")
+	if mac and model then
+		local raw = mac .. "-" .. model
+		local p = io.popen("printf '%s' '" .. raw:gsub("'", "'\\''") .. "' | sha256sum")
+		if p then
+			local hash = p:read("*l")
+			p:close()
+			hash = hash and hash:match("^%w+")
+			if hash then
+				headers[#headers + 1] = "x-hwid: " .. hash
+			end
+		end
+	end
+
+	local out = {}
+	for i = 1, #headers do
+		out[i] = "-H '" .. headers[i]:gsub("'", "'\\''") .. "'"
+	end
+	local headers_str = table.concat(out, " ")
+	local f = io.open(cache_file, "w"); if f then f:write(headers_str); f:close() end
+	return headers_str
+end
+
+local function truncate_nodes(group)
 	for _, config in pairs(CONFIG) do
 		if config.currentNodes and #config.currentNodes > 0 then
 			local newNodes = {}
 			local removeNodesSet = {}
 			for k, v in pairs(config.currentNodes) do
 				if v.currentNode and v.currentNode.add_mode == "2" then
-					if (not add_from) or (add_from and add_from == v.currentNode.add_from) then
+					if (not group) or (group:lower() == (v.currentNode.group or ""):lower()) then
 						removeNodesSet[v.currentNode[".name"]] = true
 					end
 				end
@@ -1537,7 +1642,7 @@ local function truncate_nodes(add_from)
 			end
 		else
 			if config.currentNode and config.currentNode.add_mode == "2" then
-				if (not add_from) or (add_from and add_from == config.currentNode.add_from) then
+				if (not group) or (group:lower() == (config.currentNode.group or ""):lower()) then
 					if config.delete then
 						config.delete(config)
 					elseif config.set then
@@ -1549,13 +1654,13 @@ local function truncate_nodes(add_from)
 	end
 	uci:foreach(appname, "nodes", function(node)
 		if node.add_mode == "2" then
-			if (not add_from) or (add_from and add_from == node.add_from) then
+			if (not group) or (group:lower() == (node.group or ""):lower()) then
 				uci:delete(appname, node['.name'])
 			end
 		end
 	end)
 	uci:foreach(appname, "subscribe_list", function(o)
-		if (not add_from) or add_from == o.remark then
+		if (not group) or (group:lower() == (o.remark or ""):lower()) then
 			uci:delete(appname, o['.name'], "md5")
 		end
 	end)
@@ -1690,13 +1795,13 @@ local function update_node(manual)
 
 	local group = {}
 	for _, v in ipairs(nodeResult) do
-		group[v["remark"]] = true
+		group[v["remark"]:lower()] = true
 	end
 
 	if manual == 0 and next(group) then
 		uci:foreach(appname, "nodes", function(node)
 			-- 如果未发现新节点或手动导入的节点就不要删除了...
-			if node.add_mode == "2" and (node.add_from and group[node.add_from] == true) then
+			if node.add_mode == "2" and (node.group and group[node.group:lower()] == true) then
 				uci:delete(appname, node['.name'])
 			end
 		end)
@@ -1710,7 +1815,9 @@ local function update_node(manual)
 				if type(vvv) == "table" and next(vvv) ~= nil then
 					uci:set_list(appname, cfgid, kkk, vvv)
 				else
-					uci:set(appname, cfgid, kkk, vvv)
+					if kkk ~= "group" or vvv ~= "default" then
+						uci:set(appname, cfgid, kkk, vvv)
+					end
 					-- sing-box 域名解析策略
 					if kkk == "type" and vvv == "sing-box" then
 						uci:set(appname, cfgid, "domain_strategy", domain_strategy_node)
@@ -1770,10 +1877,12 @@ local function update_node(manual)
 		end
 	end
 
-	luci.sys.call("/etc/init.d/" .. appname .. " restart > /dev/null 2>&1 &")
+	if manual ~= 1 then
+		luci.sys.call("/etc/init.d/" .. appname .. " restart > /dev/null 2>&1 &")
+	end
 end
 
-local function parse_link(raw, add_mode, add_from, cfgid)
+local function parse_link(raw, add_mode, group, cfgid)
 	if raw and #raw > 0 then
 		local nodes, szType
 		local node_list = {}
@@ -1798,26 +1907,28 @@ local function parse_link(raw, add_mode, add_from, cfgid)
 		else
 			-- ssd 外的格式
 			if add_mode == "1" then
-				nodes = split(raw:gsub(" ", "\n"), "\n")
+				nodes = split(raw, "\n")
 			else
-				nodes = split(base64Decode(raw):gsub(" ", "\n"), "\n")
+				nodes = split(base64Decode(raw):gsub("\r\n", "\n"), "\n")
 			end
 		end
 
 		for _, v in ipairs(nodes) do
-			if v and not string.match(v, "^%s*$") then
+			if v and (szType == 'ssd' or not string.match(v, "^%s*$")) then
 				xpcall(function ()
 					local result
 					if szType == 'ssd' then
-						result = processData(szType, v, add_mode, add_from)
+						result = processData(szType, v, add_mode, group)
 					elseif not szType then
 						local node = api.trim(v)
 						local dat = split(node, "://")
 						if dat and dat[1] and dat[2] then
-							if dat[1] == 'ss' or dat[1] == 'trojan' then
-								result = processData(dat[1], dat[2], add_mode, add_from)
+							if dat[1] == 'vmess' or dat[1] == 'ssr' then
+								local link = api.trim(dat[2]:gsub("#.*$", ""))
+								result = processData(dat[1], base64Decode(link), add_mode, group)
 							else
-								result = processData(dat[1], base64Decode(dat[2]), add_mode, add_from)
+								local link = dat[2]:gsub("&amp;", "&"):gsub("%s*#%s*", "#")  -- 一些奇葩的链接用"&amp;"当做"&"，"#"前后带空格
+								result = processData(dat[1], link, add_mode, group)
 							end
 						end
 					else
@@ -1848,14 +1959,14 @@ local function parse_link(raw, add_mode, add_from, cfgid)
 		end
 		if #node_list > 0 then
 			nodeResult[#nodeResult + 1] = {
-				remark = add_from,
+				remark = group,
 				list = node_list
 			}
 		end
-		log('成功解析【' .. add_from .. '】节点数量: ' .. #node_list)
+		log('成功解析【' .. group .. '】节点数量: ' .. #node_list)
 	else
 		if add_mode == "2" then
-			log('获取到的【' .. add_from .. '】订阅内容为空，可能是订阅地址无效，或是网络问题，请诊断！')
+			log('获取到的【' .. group .. '】订阅内容为空，可能是订阅地址无效，或是网络问题，请诊断！')
 		end
 	end
 end
@@ -1878,8 +1989,8 @@ local execute = function()
 
 		for index, value in ipairs(subscribe_list) do
 			local cfgid = value[".name"]
-			local remark = value.remark
-			local url = value.url
+			local remark = value.remark or ""
+			local url = value.url or ""
 			if value.allowInsecure and value.allowInsecure == "1" then
 				allowInsecure_default = true
 			end
@@ -2005,7 +2116,7 @@ if arg[1] then
 		local f = assert(io.open("/tmp/links.conf", 'r'))
 		local raw = f:read('*all')
 		f:close()
-		parse_link(raw, "1", "导入")
+		parse_link(raw, "1", arg[2])
 		update_node(1)
 		luci.sys.call("rm -f /tmp/links.conf")
 	elseif arg[1] == "truncate" then

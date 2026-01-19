@@ -166,16 +166,23 @@ local file_vpslist = TMP_ACL_PATH .. "/vpslist"
 if not is_file_nonzero(file_vpslist) then
 	local f_out = io.open(file_vpslist, "w")
 	local written_domains = {}
-	uci:foreach(appname, "nodes", function(t)
-		local function process_address(address)
-			if address == "engage.cloudflareclient.com" then return end
-			if datatypes.hostname(address) and not written_domains[address] then
-				f_out:write(address .. "\n")
-				written_domains[address] = true
-			end
+	local function process_address(address)
+		if address == "engage.cloudflareclient.com" then return end
+		if datatypes.hostname(address) and not written_domains[address] then
+			f_out:write(address .. "\n")
+			written_domains[address] = true
 		end
+	end
+	uci:foreach(appname, "nodes", function(t)
 		process_address(t.address)
 		process_address(t.download_address)
+	end)
+	uci:foreach(appname, "subscribe_list", function(t)  --订阅方式为直连时
+		local url, _ = api.get_domain_port_from_url(t.url or "")
+		local up = t.access_mode or ""
+		if url and url ~= "" and up == "direct" then
+			process_address(url)
+		end
 	end)
 	f_out:close()
 end
@@ -503,11 +510,6 @@ if DEFAULT_TAG == "none" then
 end
 
 table.insert(config_lines, "hosts")
-
-local cert_verify = uci:get(appname, "@global[0]", "chinadns_ng_cert_verify") or 0
-if tonumber(cert_verify) == 1 then
-	table.insert(config_lines, "cert-verify")
-end
 
 if DEFAULT_TAG == "chn" then
 	log(string.format("  - 默认 DNS ：%s", DNS_LOCAL))
