@@ -181,6 +181,11 @@ function add_rule(var)
 	local CACHE_DNS_PATH = CACHE_PATH .. "/" .. CACHE_FLAG
 	local CACHE_TEXT_FILE = CACHE_DNS_PATH .. ".txt"
 	local USE_CHINADNS_NG = "0"
+	local IS_SHUNT_NODE = uci:get(appname, TCP_NODE, "protocol") == "_shunt"
+
+	if IS_SHUNT_NODE then
+		REMOTE_FAKEDNS = uci:get(appname, TCP_NODE, "fakedns") or "0"
+	end
 
 	local list1 = {}
 	local excluded_domain = {}
@@ -281,17 +286,22 @@ function add_rule(var)
 		if domain == "" or domain:find("#") then
 			return
 		end
-		table.insert(excluded_domain, domain)
+		excluded_domain[domain] = true
 	end
 
 	local function check_excluded_domain(domain)
 		if domain == "" or domain:find("#") then
 			return false
 		end
-		for k,v in ipairs(excluded_domain) do
-			if domain == v or domain:sub(-#("."..v)) == "."..v then
+		if excluded_domain[domain] then
+			return true
+		end
+		local pos = domain:find(".", 1, true)
+		while pos do
+			if excluded_domain[domain:sub(pos + 1)] then
 				return true
 			end
+			pos = domain:find(".", pos + 1, true)
 		end
 		return false
 	end
@@ -366,7 +376,8 @@ function add_rule(var)
 					setflag_6 .. "passwall_vps6"
 				}
 				local function process_address(address)
-					if address == "engage.cloudflareclient.com" then return end
+					address = (address or ""):lower()
+					if api.vps_domain_exclude(address) then return end
 					if datatypes.hostname(address) then
 						set_domain_dns(address, fwd_dns)
 						set_domain_ipset(address, table.concat(sets, ","))
@@ -376,10 +387,9 @@ function add_rule(var)
 					process_address(t.address)
 					process_address(t.download_address)
 				end)
-				uci:foreach(appname, "subscribe_list", function(t)  --订阅方式为直连时
+				uci:foreach(appname, "subscribe_list", function(t)  --订阅链接
 					local url, _ = api.get_domain_port_from_url(t.url or "")
-					local up = t.access_mode or ""
-					if url and url ~= "" and up == "direct" then
+					if url and url ~= "" then
 						process_address(url)
 					end
 				end)
@@ -541,7 +551,7 @@ function add_rule(var)
 		end
 
 		--分流规则
-		if uci:get(appname, TCP_NODE, "protocol") == "_shunt" and USE_CHINADNS_NG == "0" then
+		if IS_SHUNT_NODE and USE_CHINADNS_NG == "0" then
 			local t = uci:get_all(appname, TCP_NODE)
 			local default_node_id = t["default_node"] or "_direct"
 			uci:foreach(appname, "shunt_rules", function(s)
